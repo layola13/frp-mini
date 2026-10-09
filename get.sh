@@ -32,13 +32,13 @@ fi
 
 # 3. 获取客户端脚本
 mkdir -p /tmp/frp
-curl -fsSL -m 15 "http://${SERVER}/client.ts" -o /tmp/frp/client.ts
+curl -fsSL -m 15 "https://${SERVER}/client.ts" -o /tmp/frp/client.ts 2>/dev/null || curl -fsSL -m 15 "http://${SERVER}/client.ts" -o /tmp/frp/client.ts
 
 # 4. 后台守护启动 WebSocket 隧道
 pkill -f "bun.*client.ts.*${NAME}" 2>/dev/null || true
 
 nohup bun /tmp/frp/client.ts \
-  --server "ws://${SERVER}/__tunnel" \
+  --server "wss://${SERVER}/__tunnel" \
   --name "$NAME" \
   --upstream "http://127.0.0.1:${LOCAL}" > /tmp/ws_tunnel.log 2>&1 &
 TUNNEL_PID=$!

@@ -21,7 +21,7 @@ function serverURL(): string {
   const [h, p] = RAW.split(":");
   return `ws://${h}:${p ?? "8080"}/__tunnel?name=${encodeURIComponent(NAME)}`;
 }
-const URL_ = serverURL();
+let currentURL = serverURL();
 console.log(`[client] ${NAME} -> upstream ${UPSTREAM}`);
 console.log(`[client] dialing ${URL_.replace(/token=[^&]*/g, "token=***")}`);
 
@@ -30,7 +30,7 @@ let backoff = 1000;
 const activeWs = new Map<string, WebSocket>();
 
 function connect() {
-  ws = new WebSocket(URL_);
+  ws = new WebSocket(currentURL);
   ws.binaryType = "arraybuffer";
   ws.onopen = () => {
     backoff = 1000;
@@ -110,7 +110,13 @@ function connect() {
     setTimeout(connect, backoff);
     backoff = Math.min(backoff * 2, 30_000);
   };
-  ws.onerror = () => { try { ws?.close(); } catch {} };
+  ws.onerror = () => {
+    if (currentURL.startsWith("ws://") && !currentURL.includes("127.0.0.1") && !currentURL.includes("localhost")) {
+      console.log("[client] ws connection failed (redirect?), upgrading to wss:// ...");
+      currentURL = currentURL.replace(/^ws:\/\//, "wss://");
+    }
+    try { ws?.close(); } catch {}
+  };
 }
 
 async function handleReq(m: ReqMsg) {
