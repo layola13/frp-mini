@@ -1,0 +1,13 @@
+{
+  "name": "frp",
+  "version": "0.1.0",
+  "description": "path-based reverse tunnel: https://us.cxu.lol/<name> -> remote 127.0.0.1:43110",
+  "type": "module",
+  "scripts": {
+    "server": "bun src/server.ts --http 8080",
+    "client": "bun src/client.ts --server ws://127.0.0.1:8080/__tunnel --name colab1 --upstream http://127.0.0.1:43110",
+    "demo-upstream": "bun demo/upstream.ts",
+    "alloc": "curl -sXPOST -H 'x-admin-token: ${ADMIN_TOKEN:-secret}' localhost:8080/__admin/alloc -H 'content-type: application/json' -d '{\"name\":\"colab1\"}'",
+    "routes": "curl -s localhost:8080/__routes"
+  }
+}

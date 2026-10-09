@@ -1,0 +1,13 @@
+us.cxu.lol {
+	# TLS 自动签发
+	handle /colab1* {
+		uri strip_prefix /colab1
+		reverse_proxy 127.0.0.1:8080
+	}
+	# 通用: /<name>/* -> tunnel server, 由 server 按首段路由到对应 agent
+	handle /* {
+		reverse_proxy 127.0.0.1:8080
+	}
+}
+# 说明: server 本身按 path 首段 /:name 路由, Caddy 只需整体反代。
+# 若只想暴露固定几个名字, 把上面的 handle /* 改成若干个 handle /<name>* 即可。
