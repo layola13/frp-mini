@@ -27,6 +27,7 @@ console.log(`[client] dialing ${URL_.replace(/token=[^&]*/g, "token=***")}`);
 
 let ws: WebSocket | null = null;
 let backoff = 1000;
+const activeWs = new Map<string, WebSocket>();
 
 function connect() {
   ws = new WebSocket(URL_);
@@ -42,10 +43,69 @@ function connect() {
     if (m.type === "ping") { ws?.send(JSON.stringify({ type: "pong" })); return; }
     if (m.type === "registered") { console.log(`[client] route live: /${m.name}/`); return; }
     if (m.type === "error") { console.error(`[client] server error: ${m.error}`); return; }
-    if (m.type !== "req") return;
-    await handleReq(m as ReqMsg);
+
+    // 1. HTTP 转发
+    if (m.type === "req") {
+      await handleReq(m as ReqMsg);
+      return;
+    }
+
+    // 2. WebSocket 代理转发 (为前端如 /ws 提供全双工实时通信)
+    if (m.type === "ws_open") {
+      const wsTargetUrl = UPSTREAM.replace(/^http:\/\//, "ws://").replace(/^https:\/\//, "wss://") + m.path;
+      try {
+        const upstreamWs = new WebSocket(wsTargetUrl, m.protocols ? { protocols: [m.protocols] } : undefined);
+        upstreamWs.binaryType = "arraybuffer";
+        activeWs.set(m.connId, upstreamWs);
+
+        upstreamWs.onmessage = (event) => {
+          if (typeof event.data === "string") {
+            ws?.send(JSON.stringify({ type: "ws_data", connId: m.connId, data: event.data, isBinary: false }));
+          } else {
+            const b64 = Buffer.from(event.data).toString("base64");
+            ws?.send(JSON.stringify({ type: "ws_data", connId: m.connId, data: b64, isBinary: true }));
+          }
+        };
+        upstreamWs.onclose = (event) => {
+          ws?.send(JSON.stringify({ type: "ws_close", connId: m.connId, code: event.code, reason: event.reason }));
+          activeWs.delete(m.connId);
+        };
+        upstreamWs.onerror = () => {
+          ws?.send(JSON.stringify({ type: "ws_close", connId: m.connId, code: 1011, reason: "upstream ws error" }));
+          activeWs.delete(m.connId);
+        };
+      } catch (err: any) {
+        ws?.send(JSON.stringify({ type: "ws_close", connId: m.connId, code: 1011, reason: err?.message }));
+      }
+      return;
+    }
+
+    if (m.type === "ws_data") {
+      const uws = activeWs.get(m.connId);
+      if (uws && uws.readyState === WebSocket.OPEN) {
+        if (m.isBinary && m.data) {
+          uws.send(Buffer.from(m.data, "base64"));
+        } else {
+          uws.send(m.data ?? "");
+        }
+      }
+      return;
+    }
+
+    if (m.type === "ws_close") {
+      const uws = activeWs.get(m.connId);
+      if (uws) {
+        try { uws.close(m.code || 1000, m.reason || ""); } catch {}
+        activeWs.delete(m.connId);
+      }
+      return;
+    }
   };
   ws.onclose = () => {
+    for (const [id, uws] of activeWs.entries()) {
+      try { uws.close(); } catch {}
+    }
+    activeWs.clear();
     console.log(`[client] disconnected, retry in ${backoff}ms`);
     setTimeout(connect, backoff);
     backoff = Math.min(backoff * 2, 30_000);

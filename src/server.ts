@@ -45,7 +45,7 @@ const PUBLIC_HOST = getArg("public-host", process.env.PUBLIC_HOST ?? "proxy.cxu.
 const SSH_HOST_DEF = getArg("ssh-host", process.env.SSH_HOST ?? PUBLIC_HOST);
 const SSH_USER_DEF = getArg("ssh-user", process.env.SSH_USER ?? "tunnel");
 // 系统保留名: 不可被 enroll/alloc 抢占(落地页与脚本直链优先)
-const RESERVED = new Set(["get", "join", "get.sh", "join.sh", "remote-auto.sh", "__health", "__routes", "__enroll", "__tunnel", "__admin", ...STATIC_BINDS.keys()]);
+const RESERVED = new Set(["get", "join", "get.sh", "join.sh", "client.ts", "remote-auto.sh", "__health", "__routes", "__enroll", "__tunnel", "__admin", ...STATIC_BINDS.keys()]);
 const isReserved = (n: string) => RESERVED.has(n) || n.startsWith("__");
 // 全自动 enroll: 动态口令 = SHA256(secret:step)[0:8], secret 默认取主机名 cxu.lol
 // 远端按同样规则算出口令, POST 上报加密后的 pubkey, 服务端自动绑定 authorized_keys + 分配端口
@@ -120,6 +120,7 @@ type Agent = { ws: import("bun").ServerWebSocket<{ name?: string }>; createdAt: 
 type TcpRoute = { name: string; port: number; pubkeyFp?: string; createdAt: number; expiresAt: number; via: "ssh" };
 const agents = new Map<string, Agent>();
 const tcpRoutes = new Map<string, TcpRoute>();
+const visitorSockets = new Map<string, any>();
 type PendingEntry = {
   resolve: (r: Response) => void;
   reject: (e: Error) => void;
@@ -391,7 +392,7 @@ function copy(){
 }
 </script>
 <p style="color:#666;font-size:14px">💡 如需自定义固定名称，可执行：<code>curl -fsSL http://${PUBLIC_HOST}/get.sh | NAME=自定义名字 bash</code></p>
-<p>原理：脚本自动基于机器与密钥指纹分配唯一标识 → 动态口令加密认证 → 服务端自动绑定公钥与分配端口 → <code>ssh -R</code> 安全隧道，24h 有效。<a href="/__enroll/help">算法说明</a> · <a href="/get.sh">脚本直链</a></p>
+<p>原理：脚本自动基于机器/日期指纹分配唯一标识 → 建立反向 WebSocket 隧道，24h 有效。<a href="/get.sh">脚本直链</a></p>
 <p style="color:#888">根路径 <code>/</code> 为 A 类静态绑定（本地 43110，常驻），动态隧道走 <code>/&lt;name&gt;/</code>（B 类，24h 有效），互不冲突。</p>
 </body></html>`;
 }
@@ -418,6 +419,21 @@ serve({
         wsName = resolveTunnelFromReq(req);
       }
       if (wsName) {
+        const ag = agents.get(wsName);
+        if (ag && ag.expiresAt > Date.now()) {
+          const connId = `ws-${rid()}`;
+          const upgraded = server.upgrade(req, {
+            data: {
+              kind: "agent_ws_visitor",
+              agentName: wsName,
+              connId,
+              fwdPath: wsFwdPath,
+              subprotocols: req.headers.get("sec-websocket-protocol") || undefined,
+            }
+          });
+          if (upgraded) return undefined;
+          return new Response("websocket upgrade failed", { status: 500 });
+        }
         const sb = STATIC_BINDS.get(wsName);
         const tr = tcpRoutes.get(wsName);
         let upstreamWsUrl: string | null = null;
@@ -451,13 +467,31 @@ serve({
       }
       return new Response(`远端一条命令: curl -fsSL http://${PUBLIC_HOST}/get.sh | bash\n浏览器打开 http://${PUBLIC_HOST}/get?html 查看\n`, { headers: { "content-type": "text/plain; charset=utf-8" } });
     }
-    // 脚本直链: 远端 curl -fsSL http://proxy.cxu.lol/get.sh | bash
-    if (url.pathname === "/get.sh" || url.pathname === "/join.sh" || url.pathname === "/remote-auto.sh") {
+    // 脚本直链: 远端 curl -fsSL http://${PUBLIC_HOST}/get.sh | bash (免 SSH WebSocket 隧道模式)
+    if (url.pathname === "/get.sh" || url.pathname === "/join.sh") {
+      try {
+        let sh = readFileSync(new URL("../get.sh", import.meta.url), "utf8");
+        sh = sh.replace('SERVER="${SERVER:-dev.cxu.lol}"', `SERVER="\${SERVER:-${PUBLIC_HOST}}"`);
+        return new Response(sh, { headers: { "content-type": "text/x-shellscript; charset=utf-8", "cache-control": "no-cache" } });
+      } catch (e: any) {
+        return new Response(`get.sh missing: ${e?.message ?? e}`, { status: 500 });
+      }
+    }
+    // 备选 SSH -R 免客户端模式脚本 (仅适用于独立 root Linux 服务器)
+    if (url.pathname === "/ssh.sh" || url.pathname === "/remote-auto.sh" || url.pathname === "/remote-ssh.sh") {
       try {
         const sh = readFileSync(new URL("../remote-auto.sh", import.meta.url), "utf8");
         return new Response(sh, { headers: { "content-type": "text/x-shellscript; charset=utf-8", "cache-control": "no-cache" } });
       } catch (e: any) {
-        return new Response(`get.sh missing: ${e?.message ?? e}`, { status: 500 });
+        return new Response(`ssh.sh missing: ${e?.message ?? e}`, { status: 500 });
+      }
+    }
+    if (url.pathname === "/client.ts") {
+      try {
+        const code = readFileSync(new URL("./client.ts", import.meta.url), "utf8");
+        return new Response(code, { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-cache" } });
+      } catch (e: any) {
+        return new Response(`client.ts missing: ${e?.message ?? e}`, { status: 500 });
       }
     }
     // A 类静态绑定: / -> 本地 43110(常驻,不走24h过期);精确匹配才走静态, /<name>/ 仍走动态
@@ -628,6 +662,21 @@ serve({
   websocket: {
     open(ws) {
       const data = ws.data as any;
+      if (data?.kind === "agent_ws_visitor") {
+        visitorSockets.set(data.connId, ws);
+        const ag = agents.get(data.agentName);
+        if (ag && ag.ws.readyState === WebSocket.OPEN) {
+          ag.ws.send(JSON.stringify({
+            type: "ws_open",
+            connId: data.connId,
+            path: data.fwdPath,
+            protocols: data.subprotocols,
+          }));
+        } else {
+          try { ws.close(1011, "agent offline"); } catch {}
+        }
+        return;
+      }
       if (data?.kind === "proxy_client") {
         try {
           const upstream = new WebSocket(data.targetUrl, data.subprotocols ? { protocols: [data.subprotocols] } : undefined);
@@ -659,6 +708,17 @@ serve({
     },
     message(ws, raw) {
       const data = ws.data as any;
+      if (data?.kind === "agent_ws_visitor") {
+        const ag = agents.get(data.agentName);
+        if (!ag || ag.ws.readyState !== WebSocket.OPEN) return;
+        if (typeof raw === "string") {
+          ag.ws.send(JSON.stringify({ type: "ws_data", connId: data.connId, data: raw, isBinary: false }));
+        } else {
+          const b64 = Buffer.from(raw).toString("base64");
+          ag.ws.send(JSON.stringify({ type: "ws_data", connId: data.connId, data: b64, isBinary: true }));
+        }
+        return;
+      }
       if (data?.kind === "proxy_client") {
         const upstream = data.upstream as WebSocket | undefined;
         if (!upstream) return;
@@ -686,9 +746,36 @@ serve({
       }
       if (m.type === "pong") return;
       if (m.type === "res" && m.id) { applyRes(m.id, m as ProxyRes); return; }
+      if (m.type === "ws_data" && m.connId) {
+        const vws = visitorSockets.get(m.connId);
+        if (vws && vws.readyState === WebSocket.OPEN) {
+          if (m.isBinary && m.data) {
+            vws.send(Buffer.from(m.data, "base64"));
+          } else {
+            vws.send(m.data ?? "");
+          }
+        }
+        return;
+      }
+      if (m.type === "ws_close" && m.connId) {
+        const vws = visitorSockets.get(m.connId);
+        if (vws) {
+          try { vws.close(m.code || 1000, m.reason || ""); } catch {}
+          visitorSockets.delete(m.connId);
+        }
+        return;
+      }
     },
     close(ws) {
       const data = ws.data as any;
+      if (data?.kind === "agent_ws_visitor") {
+        visitorSockets.delete(data.connId);
+        const ag = agents.get(data.agentName);
+        if (ag && ag.ws.readyState === WebSocket.OPEN) {
+          ag.ws.send(JSON.stringify({ type: "ws_close", connId: data.connId }));
+        }
+        return;
+      }
       if (data?.kind === "proxy_client") {
         const upstream = data.upstream as WebSocket | undefined;
         if (upstream && (upstream.readyState === WebSocket.OPEN || upstream.readyState === WebSocket.CONNECTING)) {
@@ -697,7 +784,16 @@ serve({
         return;
       }
       const name = data?.name;
-      if (name && agents.get(name)?.ws === (ws as any)) { agents.delete(name); console.log(`[server] agent offline: ${name}`); }
+      if (name && agents.get(name)?.ws === (ws as any)) {
+        agents.delete(name);
+        console.log(`[server] agent offline: ${name}`);
+        for (const [cid, vws] of visitorSockets.entries()) {
+          if (vws.data?.agentName === name) {
+            try { vws.close(1001, "agent disconnected"); } catch {}
+            visitorSockets.delete(cid);
+          }
+        }
+      }
     },
   },
 });
