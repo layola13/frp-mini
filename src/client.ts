@@ -23,7 +23,7 @@ function serverURL(): string {
 }
 let currentURL = serverURL();
 console.log(`[client] ${NAME} -> upstream ${UPSTREAM}`);
-console.log(`[client] dialing ${URL_.replace(/token=[^&]*/g, "token=***")}`);
+console.log(`[client] dialing ${currentURL.replace(/token=[^&]*/g, "token=***")}`);
 
 let ws: WebSocket | null = null;
 let backoff = 1000;
