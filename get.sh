@@ -44,7 +44,7 @@ nohup bun /tmp/frp/client.ts \
 TUNNEL_PID=$!
 sleep 2
 
-PUBLIC_URL="http://${SERVER}/${NAME}/"
+PUBLIC_URL="https://${SERVER}/${NAME}/"
 echo ""
 echo "=================================================="
 echo "✅ 隧道已在后台成功启动！(PID: $TUNNEL_PID)"
