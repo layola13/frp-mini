@@ -1,0 +1,108 @@
+// Command frp-go is the Go port of frp-mini's tunnel pieces.
+//
+// One binary, --mode selects the piece (flags mirror the TS server/client):
+//
+//	frp-go --mode ws-server --http 8080 --ttl-hours 24 --upstream-timeout 5m
+//	frp-go --mode ws-client --server wss://host/__tunnel --name colab1 --upstream http://127.0.0.1:43110
+//	frp-go --mode ssh-client --server dev.cxu.lol --name colab1 --local 43110
+//
+// Set --mode once; everything else has the same defaults as the TS version,
+// except --upstream-timeout (the TS server hardcodes 25s; here 5m, tunable).
+package main
+
+import (
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"strings"
+	"time"
+
+	"frp-go/gotunnel"
+)
+
+func main() {
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	mode := flag.String("mode", "", "ws-server | ws-client | ssh-client (required)")
+	// shared
+	httpPort := flag.Int("http", 8080, "ws-server listen port")
+	token := flag.String("token", os.Getenv("TUNNEL_TOKEN"), "agent token (ws-server expects, ws-client sends)")
+	ttlHours := flag.Float64("ttl-hours", 24, "agent/route TTL hours")
+	upstreamTimeout := flag.Duration("upstream-timeout", 5*time.Minute, "per-request upstream deadline (the 25s-wall fix)")
+	db := flag.String("db", "./data/routes.json", "ssh routes DB (same JSON as the TS server)")
+	publicHost := flag.String("public-host", "proxy.cxu.lol", "public hostname for URLs")
+	staticRoot := flag.String("static-root", "http://127.0.0.1:43110", "static / binding (empty disables)")
+	staticBinds := flag.String("static-binds", "", "extra static binds name=url,...")
+	repoDir := flag.String("repo-dir", ".", "repo root serving get.sh/client.ts")
+	sshBase := flag.Int("ssh-base-port", 14000, "ssh -R port range base")
+	sshMax := flag.Int("ssh-max-slots", 200, "ssh -R port range size")
+	// client
+	server := flag.String("server", "", "tunnel server URL (ws-client: wss://host/__tunnel; ssh-client: host)")
+	name := flag.String("name", "colab1", "tunnel name")
+	upstream := flag.String("upstream", "http://127.0.0.1:43110", "local upstream base")
+	local := flag.Int("local", 43110, "ssh-client local port")
+	keyFile := flag.String("key", os.ExpandEnv("$HOME/.ssh/tunnel"), "ssh-client key file")
+	enrollSecret := flag.String("enroll-secret", "cxu.lol", "ssh-client enroll secret")
+	enrollStep := flag.Int64("enroll-step-sec", 300, "ssh-client enroll time step")
+	sshUser := flag.String("ssh-user", "tunnel", "ssh-client remote user")
+	flag.Parse()
+
+	switch *mode {
+	case "ws-server":
+		opt := gotunnel.DefaultOptions()
+		opt.HTTPPort = *httpPort
+		opt.Token = *token
+		opt.TTL = time.Duration(*ttlHours * float64(time.Hour))
+		opt.UpstreamTimeout = *upstreamTimeout
+		opt.DBFile = *db
+		opt.PublicHost = *publicHost
+		opt.StaticRoot = *staticRoot
+		opt.StaticBinds = parseBinds(*staticBinds)
+		opt.RepoDir = *repoDir
+		opt.SSHBasePort = *sshBase
+		opt.SSHMaxSlots = *sshMax
+		srv := gotunnel.NewServer(opt)
+		log.Fatal(srv.Run())
+	case "ws-client":
+		if *server == "" {
+			fatal("ws-client needs --server")
+		}
+		gotunnel.NewClient(gotunnel.ClientOptions{
+			Server: *server, Name: *name, Upstream: *upstream, Token: *token,
+		}).Run()
+	case "ssh-client":
+		if *server == "" {
+			fatal("ssh-client needs --server")
+		}
+		gotunnel.NewSSHClient(gotunnel.SSHOptions{
+			Server: *server, User: *sshUser, Local: *local, KeyFile: *keyFile,
+			Name: *name, Secret: *enrollSecret, StepSec: *enrollStep,
+			Upstream: *upstream,
+		}).Run()
+	default:
+		fmt.Fprintln(os.Stderr, "need --mode ws-server|ws-client|ssh-client")
+		flag.Usage()
+		os.Exit(2)
+	}
+}
+
+func parseBinds(s string) map[string]string {
+	out := map[string]string{}
+	for _, pair := range strings.Split(s, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		i := strings.Index(pair, "=")
+		if i <= 0 {
+			continue
+		}
+		out[strings.ToLower(strings.TrimSpace(pair[:i]))] = strings.TrimSuffix(strings.TrimSpace(pair[i+1:]), "/")
+	}
+	return out
+}
+
+func fatal(msg string) {
+	fmt.Fprintln(os.Stderr, msg)
+	os.Exit(2)
+}
