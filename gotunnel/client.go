@@ -98,7 +98,22 @@ type Client struct {
 	mu       sync.Mutex
 	conn     *websocket.Conn
 	upConns  map[string]*websocket.Conn // connId -> upstream ws
+	upMu     sync.Mutex                 // serializes upstream writes (incl. close frames)
 	streamOK bool                       // server advertised streaming
+}
+
+// writeUp writes one frame to an upstream connection. Gorilla connections
+// (data and close frames alike) must not be written concurrently.
+func (c *Client) writeUp(connID string, mt int, data []byte) error {
+	c.mu.Lock()
+	u, ok := c.upConns[connID]
+	c.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("upstream %s gone", connID)
+	}
+	c.upMu.Lock()
+	defer c.upMu.Unlock()
+	return u.WriteMessage(mt, data)
 }
 
 // NewClient builds a Client.
@@ -257,17 +272,12 @@ func (c *Client) serveOnce() error {
 		case MsgWSData:
 			var m WSDataMsg
 			if json.Unmarshal(raw, &m) == nil {
-				c.mu.Lock()
-				u := c.upConns[m.ConnID]
-				c.mu.Unlock()
-				if u != nil {
-					if m.IsBinary && m.Data != "" {
-						if b, err := DecodeBody(m.Data); err == nil {
-							_ = u.WriteMessage(websocket.BinaryMessage, b)
-						}
-					} else {
-						_ = u.WriteMessage(websocket.TextMessage, []byte(m.Data))
+				if m.IsBinary && m.Data != "" {
+					if b, err := DecodeBody(m.Data); err == nil {
+						_ = c.writeUp(m.ConnID, websocket.BinaryMessage, b)
 					}
+				} else {
+					_ = c.writeUp(m.ConnID, websocket.TextMessage, []byte(m.Data))
 				}
 			}
 		case MsgWSClose:
@@ -290,8 +300,10 @@ func (c *Client) closeUpstream(connID string, code int, reason string) {
 		if code == 0 {
 			code = websocket.CloseNormalClosure
 		}
+		c.upMu.Lock()
 		_ = u.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason))
 		_ = u.Close()
+		c.upMu.Unlock()
 	}
 }
 

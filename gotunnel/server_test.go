@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -359,4 +360,75 @@ func TestMultiNameOneConn(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// TestConcurrentControlWrites hammers one agent with parallel HTTP turns
+// plus re-registers on the same control conn. Run with -race: any
+// concurrent control-frame write corrupts the stream (the legacy-client
+// flap) and the detector flags it.
+func TestConcurrentControlWrites(t *testing.T) {
+	_, httpSrv := testServer(t)
+	wsURL := strings.Replace(httpSrv.URL, "http://", "ws://", 1) + "/__tunnel"
+	c, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.WriteJSON(RegisterMsg{Type: MsgRegister, Name: "race1"}); err != nil {
+		t.Fatal(err)
+	}
+	// Dedicated answer loop (single reader) + parallel turns.
+	// Test-side writes share one mutex, mirroring production send()
+	// discipline, so -race only flags server-side violations.
+	var wmu sync.Mutex
+	twrite := func(v any) error {
+		wmu.Lock()
+		defer wmu.Unlock()
+		return c.WriteJSON(v)
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			var m ReqMsg
+			c.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+			if err := c.ReadJSON(&m); err != nil {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				continue
+			}
+			if m.Type != MsgReq {
+				continue
+			}
+			_ = twrite(ResMsg{Type: MsgRes, ID: m.ID, Status: 200,
+				Headers: map[string]string{"content-type": "text/plain"},
+				BodyB64: EncodeBody([]byte("ok"))})
+		}
+	}()
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if i%4 == 0 {
+				// Concurrent re-register on the same conn (exercises the
+				// register-vs-request write interleave that dropped clients).
+				_ = twrite(RegisterMsg{Type: MsgRegister, Name: "race1"})
+			}
+			resp, err := http.Get(httpSrv.URL + "/race1/t")
+			if err != nil {
+				t.Errorf("turn %d: %v", i, err)
+				return
+			}
+			raw, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if string(raw) != "ok" {
+				t.Errorf("turn %d = %q", i, raw)
+			}
+		}(i)
+	}
+	wg.Wait()
 }

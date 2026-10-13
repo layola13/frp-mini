@@ -108,9 +108,41 @@ type Server struct {
 	routes   map[string]*tcpRoute
 	pending  map[string]*pendingReq
 	visitors map[string]*websocket.Conn // connId -> visitor ws
+	visMu    sync.Mutex                 // serializes visitor writes (incl. close frames)
 
 	wsUpgrader websocket.Upgrader
 	seq        uint64
+}
+
+// writeVisitor writes one frame to a visitor connection.
+func (s *Server) writeVisitor(connID string, mt int, data []byte) error {
+	s.mu.Lock()
+	vws, ok := s.visitors[connID]
+	s.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("visitor %s gone", connID)
+	}
+	s.visMu.Lock()
+	defer s.visMu.Unlock()
+	return vws.WriteMessage(mt, data)
+}
+
+// writeVisitorClose sends a close frame and drops the visitor, atomically
+// with respect to concurrent data writes.
+func (s *Server) writeVisitorClose(connID string, code int, reason string) {
+	s.mu.Lock()
+	vws, ok := s.visitors[connID]
+	if ok {
+		delete(s.visitors, connID)
+	}
+	s.mu.Unlock()
+	if !ok {
+		return
+	}
+	s.visMu.Lock()
+	defer s.visMu.Unlock()
+	_ = vws.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason))
+	_ = vws.Close()
 }
 
 var reservedExact = []string{"get", "join", "get.sh", "join.sh", "client.ts", "remote-auto.sh", "__health", "__routes", "__enroll", "__tunnel", "__admin"}
@@ -132,6 +164,7 @@ func NewServer(opt Options) *Server {
 	}
 	s.loadDB()
 	go s.sweepLoop()
+	go s.pingLoop()
 	return s
 }
 
@@ -259,14 +292,23 @@ func (s *Server) sweep() {
 	if changed {
 		s.saveDB()
 	}
-	// keep-alive pings like the TS server (25s).
-	s.mu.Lock()
-	for _, a := range s.agents {
-		a.writeMu.Lock()
-		_ = a.conn.WriteJSON(map[string]string{"type": MsgPing})
-		a.writeMu.Unlock()
+}
+
+// pingLoop sends keep-alive pings every 25s like the TS server.
+func (s *Server) pingLoop() {
+	t := time.NewTicker(25 * time.Second)
+	defer t.Stop()
+	for range t.C {
+		s.mu.Lock()
+		names := make([]string, 0, len(s.agents))
+		for n := range s.agents {
+			names = append(names, n)
+		}
+		s.mu.Unlock()
+		for _, n := range names {
+			_ = s.agentSend(n, map[string]string{"type": MsgPing})
+		}
 	}
-	s.mu.Unlock()
 }
 
 // ---- HTTP routing ----
@@ -656,7 +698,7 @@ func copyHeadersExcept(dst, src http.Header) {
 // Timeout is flag-tunable (default 5m); the legacy 25s wall is gone.
 func (s *Server) forwardViaAgent(name string, w http.ResponseWriter, r *http.Request, fwdPath string) {
 	s.mu.Lock()
-	a, ok := s.agents[name]
+	_, ok := s.agents[name]
 	s.mu.Unlock()
 	if !ok {
 		http.Error(w, fmt.Sprintf("agent '%s' offline", name), http.StatusBadGateway)
@@ -676,10 +718,10 @@ func (s *Server) forwardViaAgent(name string, w http.ResponseWriter, r *http.Req
 		}
 	}
 	id := s.nextID()
-	msg, _ := json.Marshal(ReqMsg{
+	req := ReqMsg{
 		Type: MsgReq, Method: r.Method, Path: fwdPath, Tunnel: name,
 		ID: id, Headers: hopHeaders(r.Header), BodyB64: EncodeBody(body),
-	})
+	}
 	flusher, canFlush := w.(http.Flusher)
 	p := &pendingReq{name: name, doneCh: make(chan struct{})}
 	p.timer = time.AfterFunc(s.opt.UpstreamTimeout, func() {
@@ -703,10 +745,7 @@ func (s *Server) forwardViaAgent(name string, w http.ResponseWriter, r *http.Req
 	if canFlush {
 		p.flusher = flusher
 	}
-	a.writeMu.Lock()
-	err := a.conn.WriteMessage(websocket.TextMessage, msg)
-	a.writeMu.Unlock()
-	if err != nil {
+	if err := s.agentSend(name, req); err != nil {
 		p.timer.Stop()
 		s.mu.Lock()
 		delete(s.pending, id)
@@ -934,7 +973,7 @@ func (s *Server) serveControl(w http.ResponseWriter, r *http.Request) {
 				agentNames = append(agentNames, name)
 			}
 			s.mu.Unlock()
-			_ = conn.WriteJSON(map[string]any{
+			_ = s.agentSend(name, map[string]any{
 				"type": MsgRegistered, "name": name,
 				"expiresAt": exp.UnixMilli(),
 				"publicUrl": fmt.Sprintf("https://%s/%s/", s.opt.PublicHost, name),
@@ -971,43 +1010,42 @@ func (s *Server) serveControl(w http.ResponseWriter, r *http.Request) {
 			if err := json.Unmarshal(raw, &m); err != nil || m.ConnID == "" {
 				continue
 			}
-			s.mu.Lock()
-			vws, ok := s.visitors[m.ConnID]
-			s.mu.Unlock()
-			if !ok {
-				continue
-			}
 			if m.IsBinary && m.Data != "" {
 				if b, err := DecodeBody(m.Data); err == nil {
-					_ = vws.WriteMessage(websocket.BinaryMessage, b)
+					_ = s.writeVisitor(m.ConnID, websocket.BinaryMessage, b)
 				}
 			} else {
-				_ = vws.WriteMessage(websocket.TextMessage, []byte(m.Data))
+				_ = s.writeVisitor(m.ConnID, websocket.TextMessage, []byte(m.Data))
 			}
 		case MsgWSClose:
 			var m WSCloseMsg
 			if err := json.Unmarshal(raw, &m); err != nil || m.ConnID == "" {
 				continue
 			}
-			s.mu.Lock()
-			vws, ok := s.visitors[m.ConnID]
-			if ok {
-				delete(s.visitors, m.ConnID)
+			code := m.Code
+			if code == 0 {
+				code = websocket.CloseNormalClosure
 			}
-			s.mu.Unlock()
-			if ok {
-				code := m.Code
-				if code == 0 {
-					code = websocket.CloseNormalClosure
-				}
-				_ = vws.WriteMessage(websocket.CloseMessage,
-					websocket.FormatCloseMessage(code, m.Reason))
-			}
+			s.writeVisitorClose(m.ConnID, code, m.Reason)
 		}
 	}
 }
 
-// visitorCtx carries an upgraded visitor websocket and its target.
+// agentSend serializes ALL control-channel writes per agent. Gorilla
+// connections do not support concurrent writers: mixing direct WriteJSON
+// calls with mutex-guarded ones corrupts frames and drops old clients.
+func (s *Server) agentSend(name string, v any) error {
+	s.mu.Lock()
+	ag, ok := s.agents[name]
+	s.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("agent %s offline", name)
+	}
+	ag.writeMu.Lock()
+	defer ag.writeMu.Unlock()
+	return ag.conn.WriteJSON(v)
+}
+
 type visitorCtx struct {
 	conn      *websocket.Conn
 	connID    string
@@ -1053,10 +1091,8 @@ func (s *Server) serveVisitorWS(w http.ResponseWriter, r *http.Request) {
 		s.visitors[connID] = conn
 		s.mu.Unlock()
 		vc := &visitorCtx{conn: conn, connID: connID, agentName: wsName, fwdPath: fwdPath}
-		ag.writeMu.Lock()
-		err = ag.conn.WriteJSON(WSOpenMsg{Type: MsgWSOpen, ConnID: connID, Path: fwdPath, Tunnel: wsName,
+		err = s.agentSend(wsName, WSOpenMsg{Type: MsgWSOpen, ConnID: connID, Path: fwdPath, Tunnel: wsName,
 			Protocols: r.Header.Get("Sec-WebSocket-Protocol")})
-		ag.writeMu.Unlock()
 		if err != nil {
 			s.closeVisitor(vc, websocket.CloseInternalServerErr, "agent offline")
 			return
@@ -1091,19 +1127,8 @@ func (s *Server) serveVisitorWS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) closeVisitor(vc *visitorCtx, code int, reason string) {
-	s.mu.Lock()
-	if cur, ok := s.visitors[vc.connID]; ok && cur == vc.conn {
-		delete(s.visitors, vc.connID)
-	}
-	ag, ok := s.agents[vc.agentName]
-	s.mu.Unlock()
-	_ = vc.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason))
-	_ = vc.conn.Close()
-	if ok {
-		ag.writeMu.Lock()
-		_ = ag.conn.WriteJSON(WSCloseMsg{Type: MsgWSClose, ConnID: vc.connID})
-		ag.writeMu.Unlock()
-	}
+	s.writeVisitorClose(vc.connID, code, reason)
+	_ = s.agentSend(vc.agentName, WSCloseMsg{Type: MsgWSClose, ConnID: vc.connID})
 }
 
 // pumpVisitor forwards visitor -> agent frames.
@@ -1115,7 +1140,7 @@ func (s *Server) pumpVisitor(vc *visitorCtx) {
 			return
 		}
 		s.mu.Lock()
-		ag, ok := s.agents[vc.agentName]
+		_, ok := s.agents[vc.agentName]
 		s.mu.Unlock()
 		if !ok {
 			return
@@ -1129,10 +1154,7 @@ func (s *Server) pumpVisitor(vc *visitorCtx) {
 		} else {
 			msg.Data = string(data)
 		}
-		ag.writeMu.Lock()
-		err = ag.conn.WriteJSON(msg)
-		ag.writeMu.Unlock()
-		if err != nil {
+		if err := s.agentSend(vc.agentName, msg); err != nil {
 			return
 		}
 	}
