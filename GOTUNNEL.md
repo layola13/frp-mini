@@ -36,5 +36,7 @@ go build -o frp-go ./cmd/frp-go   # 或：GOPROXY=off go build -mod=vendor ./...
 
 ## 本分支未做（phase 2）
 
-`/__enroll`、`/__admin/*`、落地页：ssh 新用户开户仍走 TS 服务端；WS 用户不受影响。
-`ssh-client --local` 暂只支持单端口（多端口 enroll 命名规则待定）。
+- 落地页 HTML 版（`/get` 只有文本版）；`ssh-client --local` 暂只支持单端口。
+- 生产部署切换（建议先在 dev 机旁跑 Go `ws-server` 读同一 `routes.json` 混跑）。
+- 已验证：原版 openssh `get.sh` 全流程（enroll→ssh-R→回源）本地实跑通过；
+  `/get.sh`（ws 版）与 `/ssh.sh`（原版）双版本同服。

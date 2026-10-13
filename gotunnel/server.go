@@ -36,6 +36,17 @@ type Options struct {
 	StaticRoot      string
 	StaticBinds     map[string]string
 	RepoDir         string // serves get.sh/client.ts/landing like the TS server
+	// SSH-mode onboarding (original openssh get.sh flow).
+	EnrollSecret  string
+	EnrollStepSec int64
+	AuthKeysFile  string
+	SSHHost       string
+	SSHUser       string
+	// GetSHFile is served at /get.sh (ws/bun version by default);
+	// SSHSHFile is served at /ssh.sh and /get-ssh.sh (original openssh
+	// version). Two /get.sh flavours, like the old deployment.
+	GetSHFile string
+	SSHSHFile string
 }
 
 // DefaultOptions mirrors the TS defaults (except UpstreamTimeout, which is
@@ -52,6 +63,12 @@ func DefaultOptions() Options {
 		StaticRoot:      "http://127.0.0.1:43110",
 		StaticBinds:     map[string]string{},
 		RepoDir:         ".",
+		EnrollSecret:    "cxu.lol",
+		EnrollStepSec:   300,
+		AuthKeysFile:    "/home/tunnel/.ssh/authorized_keys",
+		SSHUser:         "tunnel",
+		GetSHFile:       "get.sh",
+		SSHSHFile:       "get-ssh.sh",
 	}
 }
 
@@ -298,9 +315,35 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == "/get.sh" || r.URL.Path == "/join.sh" {
-		s.serveRepoFile(w, "get.sh", "text/x-shellscript; charset=utf-8", map[string]string{
-			`SERVER="${SERVER:-dev.cxu.lol}"`: fmt.Sprintf(`SERVER="${SERVER:-%s}"`, s.opt.PublicHost),
+		s.serveScript(w, s.opt.GetSHFile)
+		return
+	}
+	// Original openssh flavour of /get.sh (proxy.cxu.lol mode).
+	if r.URL.Path == "/ssh.sh" || r.URL.Path == "/get-ssh.sh" || r.URL.Path == "/remote-auto.sh" || r.URL.Path == "/remote-ssh.sh" {
+		s.serveScript(w, s.opt.SSHSHFile)
+		return
+	}
+	if r.URL.Path == "/__enroll" && r.Method == "POST" {
+		s.handleEnroll(w, r)
+		return
+	}
+	if r.URL.Path == "/__enroll/help" {
+		writeJSON(w, 200, map[string]any{
+			"ok": true, "host": s.opt.PublicHost,
+			"algo":       "code = sha256(SECRET + ':' + floor(unix_now / STEP))[0:8]",
+			"secretHint": "cxu.lol", "stepSec": s.opt.EnrollStepSec, "skew": "±1 step",
+			"example_sh": `CODE=$(echo -n "cxu.lol:$(( $(date +%s) / 300 ))" | sha256sum | cut -c1-8)`,
+			"encrypt_sh": `openssl enc -aes-256-cbc -pbkdf2 -pass pass:$CODE -in ~/.ssh/tunnel.pub | base64 | tr -d '\n'`,
+			"post":       fmt.Sprintf(`curl -XPOST https://%s/__enroll -d '{"name":"colab1","code":"$CODE","pubkey_enc":"..."}'`, s.opt.PublicHost),
 		})
+		return
+	}
+	if r.URL.Path == "/__admin/alloc" && r.Method == "POST" {
+		s.handleAdminAlloc(w, r)
+		return
+	}
+	if r.URL.Path == "/__admin/release" && r.Method == "POST" {
+		s.handleAdminRelease(w, r)
 		return
 	}
 	if r.URL.Path == "/client.ts" {
@@ -377,6 +420,24 @@ func (s *Server) serveRepoFile(w http.ResponseWriter, rel, ctype string, repl ma
 		body = strings.ReplaceAll(body, k, v)
 	}
 	w.Header().Set("content-type", ctype)
+	w.Header().Set("cache-control", "no-cache")
+	_, _ = io.WriteString(w, body)
+}
+
+var serverDefaultRE = regexp.MustCompile(`SERVER="\$\{SERVER:-[^}]*\}"`)
+
+// serveScript serves a get.sh flavour with its embedded default SERVER
+// rewritten to this server's public host (both ws + ssh flavours share the
+// same `SERVER="${SERVER:-...}"` idiom).
+func (s *Server) serveScript(w http.ResponseWriter, rel string) {
+	raw, err := os.ReadFile(filepath.Join(s.opt.RepoDir, rel))
+	if err != nil {
+		http.Error(w, rel+" missing: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	body := serverDefaultRE.ReplaceAllString(string(raw),
+		`SERVER="${SERVER:-`+s.opt.PublicHost+`}"`)
+	w.Header().Set("content-type", "text/x-shellscript; charset=utf-8")
 	w.Header().Set("cache-control", "no-cache")
 	_, _ = io.WriteString(w, body)
 }

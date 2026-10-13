@@ -36,15 +36,20 @@ func main() {
 	repoDir := flag.String("repo-dir", ".", "repo root serving get.sh/client.ts")
 	sshBase := flag.Int("ssh-base-port", 14000, "ssh -R port range base")
 	sshMax := flag.Int("ssh-max-slots", 200, "ssh -R port range size")
+	enrollSecret := flag.String("enroll-secret", "cxu.lol", "enroll secret (server verifies, ssh-client computes)")
+	enrollStep := flag.Int64("enroll-step-sec", 300, "enroll time step seconds")
+	authKeys := flag.String("auth-keys", "/home/tunnel/.ssh/authorized_keys", "ssh-mode authorized_keys file")
+	sshHost := flag.String("ssh-host", "", "ssh public host (server advertises, default public-host)")
+	sshUser := flag.String("ssh-user", "tunnel", "ssh remote user (server advertises, ssh-client dials)")
+	adminToken := flag.String("admin-token", os.Getenv("ADMIN_TOKEN"), "POST /__admin/* token (empty disables auth)")
+	getshFile := flag.String("getsh-file", "get.sh", "script served at /get.sh (ws flavour)")
+	sshshFile := flag.String("sshsh-file", "get-ssh.sh", "script served at /ssh.sh (original openssh flavour)")
 	// client
 	server := flag.String("server", "", "tunnel server URL (ws-client: wss://host/__tunnel; ssh-client: host)")
 	name := flag.String("name", "colab1", "tunnel name")
 	upstream := flag.String("upstream", "http://127.0.0.1:43110", "local upstream base")
 	local := flag.Int("local", 43110, "ssh-client local port")
 	keyFile := flag.String("key", os.ExpandEnv("$HOME/.ssh/tunnel"), "ssh-client key file")
-	enrollSecret := flag.String("enroll-secret", "cxu.lol", "ssh-client enroll secret")
-	enrollStep := flag.Int64("enroll-step-sec", 300, "ssh-client enroll time step")
-	sshUser := flag.String("ssh-user", "tunnel", "ssh-client remote user")
 	flag.Parse()
 
 	switch *mode {
@@ -61,6 +66,14 @@ func main() {
 		opt.RepoDir = *repoDir
 		opt.SSHBasePort = *sshBase
 		opt.SSHMaxSlots = *sshMax
+		opt.EnrollSecret = *enrollSecret
+		opt.EnrollStepSec = *enrollStep
+		opt.AuthKeysFile = *authKeys
+		opt.SSHHost = *sshHost
+		opt.SSHUser = *sshUser
+		opt.AdminToken = *adminToken
+		opt.GetSHFile = *getshFile
+		opt.SSHSHFile = *sshshFile
 		srv := gotunnel.NewServer(opt)
 		log.Fatal(srv.Run())
 	case "ws-client":
