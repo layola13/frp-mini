@@ -199,7 +199,7 @@ func (s *Server) enrollJSON(name string, r *tcpRoute) map[string]any {
 		"ok": true, "name": name, "port": r.Port,
 		"createdAt": r.CreatedAt, "expiresAt": r.ExpiresAt, "via": r.Via,
 		"publicUrl": fmt.Sprintf("https://%s/%s/", s.opt.PublicHost, name),
-		"sshCmd":    fmt.Sprintf("ssh -NTR 127.0.0.1:%d:127.0.0.1:43110 %s@%s", r.Port, sshUser, sshHost),
+		"sshCmd":    fmt.Sprintf("ssh -NTR 127.0.0.1:%d:127.0.0.1:43210 %s@%s", r.Port, sshUser, sshHost),
 	}
 }
 

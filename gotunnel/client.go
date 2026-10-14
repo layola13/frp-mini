@@ -30,8 +30,8 @@ type upstreamRoute struct {
 	base   string // no trailing slash
 }
 
-// parseUpstreams parses "http://127.0.0.1:43110" (single default) or
-// "/app=http://127.0.0.1:43110,/api=http://127.0.0.1:8080" plus an
+// parseUpstreams parses "http://127.0.0.1:43210" (single default) or
+// "/app=http://127.0.0.1:43210,/api=http://127.0.0.1:18080" plus an
 // optional bare default entry. Result is longest-prefix-first.
 func parseUpstreams(s string) ([]upstreamRoute, error) {
 	var out []upstreamRoute
@@ -164,7 +164,7 @@ func (c *Client) serverURL(name string) string {
 		}
 		return raw + sep + "name=" + url.QueryEscape(name)
 	}
-	h, p := raw, "8080"
+	h, p := raw, "18080"
 	if i := strings.LastIndex(raw, ":"); i >= 0 {
 		h, p = raw[:i], raw[i+1:]
 	}

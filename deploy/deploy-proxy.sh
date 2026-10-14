@@ -4,9 +4,9 @@
 # 前提: DNS 已加 proxy.cxu.lol -> 31.58.87.230; 本脚本装 bun/nginx/sshd-tunnel/frp/systemd
 set -euo pipefail
 APP_DIR="/opt/frp"
-PORT="8080"
+PORT="18080"
 TTL_HOURS="24"
-STATIC_ROOT="${STATIC_ROOT:-}"   # 线上建议留空: / 根只做 get 落地+404,不反代本地43110,避免与主站混淆
+STATIC_ROOT="${STATIC_ROOT:-}"   # 线上建议留空: / 根只做 get 落地+404,不反代本地43210,避免与主站混淆
 
 command -v bun >/dev/null || { curl -fsSL https://bun.sh/install | bash; export PATH="$HOME/.bun/bin:$PATH"; }
 command -v nginx >/dev/null || { apt-get update -y && apt-get install -y nginx openssh-server; }

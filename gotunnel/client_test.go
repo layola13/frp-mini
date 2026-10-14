@@ -4,12 +4,12 @@ import "testing"
 
 func TestParseUpstreams(t *testing.T) {
 	// Single bare base = one default route.
-	r, err := parseUpstreams("http://127.0.0.1:43110")
-	if err != nil || len(r) != 1 || r[0].prefix != "/" || r[0].base != "http://127.0.0.1:43110" {
+	r, err := parseUpstreams("http://127.0.0.1:43210")
+	if err != nil || len(r) != 1 || r[0].prefix != "/" || r[0].base != "http://127.0.0.1:43210" {
 		t.Fatalf("single = %+v %v", r, err)
 	}
 	// Mixed prefixed + default.
-	r, err = parseUpstreams("/codex=http://127.0.0.1:43110, /api=http://127.0.0.1:8080, http://127.0.0.1:9000")
+	r, err = parseUpstreams("/codex=http://127.0.0.1:43210, /api=http://127.0.0.1:18080, http://127.0.0.1:9000")
 	if err != nil {
 		t.Fatal(err)
 	}

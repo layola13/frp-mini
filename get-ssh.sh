@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 远端全自动接入: https://proxy.cxu.lol/<name> -> 本机 127.0.0.1:43110
+# 远端全自动接入(go分支): https://proxy.cxu.lol/<name> -> 本机 127.0.0.1:43210
 # 全程无需管理员: 自动生成唯一主机名, 自动生成密钥, 加密上报, 服务端分配端口并建立隧道
 # 用法: curl -fsSL http://proxy.cxu.lol/get.sh | bash
 # 也可自定义名称: curl -fsSL http://proxy.cxu.lol/get.sh | NAME=mycustom bash
@@ -7,7 +7,7 @@ set -euo pipefail
 
 SERVER="${SERVER:-proxy.cxu.lol}"
 USER="${USER:-tunnel}"
-LOCAL="${LOCAL:-43110}"
+LOCAL="${LOCAL:-43210}"
 KEY="${KEY:-$HOME/.ssh/tunnel}"
 SECRET="${SECRET:-cxu.lol}"
 STEP="${STEP:-300}"

@@ -2,9 +2,9 @@
 //
 // One binary, --mode selects the piece (flags mirror the TS server/client):
 //
-//	frp-go --mode ws-server --http 8080 --ttl-hours 24 --upstream-timeout 5m
-//	frp-go --mode ws-client --server wss://host/__tunnel --name colab1 --upstream http://127.0.0.1:43110
-//	frp-go --mode ssh-client --server dev.cxu.lol --name colab1 --local 43110
+//	frp-go --mode ws-server --http 18080 --ttl-hours 24 --upstream-timeout 5m
+//	frp-go --mode ws-client --server wss://host/__tunnel --name colab1 --upstream http://127.0.0.1:43210
+//	frp-go --mode ssh-client --server dev.cxu.lol --name colab1 --local 43210
 //
 // Set --mode once; everything else has the same defaults as the TS version,
 // except --upstream-timeout (the TS server hardcodes 25s; here 5m, tunable).
@@ -25,16 +25,16 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	mode := flag.String("mode", "", "ws-server | ws-client | ssh-client (required)")
 	// shared
-	httpPort := flag.Int("http", 8080, "ws-server listen port")
+	httpPort := flag.Int("http", 18080, "ws-server listen port (go branch, offset from main)")
 	token := flag.String("token", os.Getenv("TUNNEL_TOKEN"), "agent token (ws-server expects, ws-client sends)")
 	ttlHours := flag.Float64("ttl-hours", 24, "agent/route TTL hours")
 	upstreamTimeout := flag.Duration("upstream-timeout", 5*time.Minute, "per-request upstream deadline (the 25s-wall fix)")
 	db := flag.String("db", "./data/routes.json", "ssh routes DB (same JSON as the TS server)")
 	publicHost := flag.String("public-host", "proxy.cxu.lol", "public hostname for URLs")
-	staticRoot := flag.String("static-root", "http://127.0.0.1:43110", "static / binding (empty disables)")
+	staticRoot := flag.String("static-root", "http://127.0.0.1:43210", "static / binding (empty disables; go branch, offset from main)")
 	staticBinds := flag.String("static-binds", "", "extra static binds name=url,...")
 	repoDir := flag.String("repo-dir", ".", "repo root serving get.sh/client.ts")
-	sshBase := flag.Int("ssh-base-port", 14000, "ssh -R port range base")
+	sshBase := flag.Int("ssh-base-port", 15000, "ssh -R port range base (go branch, offset from main)")
 	sshMax := flag.Int("ssh-max-slots", 200, "ssh -R port range size")
 	enrollSecret := flag.String("enroll-secret", "cxu.lol", "enroll secret (server verifies, ssh-client computes)")
 	enrollStep := flag.Int64("enroll-step-sec", 300, "enroll time step seconds")
@@ -47,8 +47,8 @@ func main() {
 	// client
 	server := flag.String("server", "", "tunnel server URL (ws-client: wss://host/__tunnel; ssh-client: host)")
 	name := flag.String("name", "colab1", "tunnel name")
-	upstream := flag.String("upstream", "http://127.0.0.1:43110", "local upstream base")
-	local := flag.Int("local", 43110, "ssh-client local port")
+	upstream := flag.String("upstream", "http://127.0.0.1:43210", "local upstream base (go branch, offset from main)")
+	local := flag.Int("local", 43210, "ssh-client local port (go branch, offset from main)")
 	keyFile := flag.String("key", os.ExpandEnv("$HOME/.ssh/tunnel"), "ssh-client key file")
 	flag.Parse()
 

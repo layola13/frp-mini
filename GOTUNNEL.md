@@ -8,23 +8,23 @@ TypeScript 版（`main`/`ws` 分支，Bun）的 Go 重写：单二进制、`--mo
 | 问题 | TS 现状 | Go 版 |
 |---|---|---|
 | 长 turn 必死 | 服务端 `UPSTREAM_TIMEOUT_MS = 25_000` 硬编码；客户端 `await r.arrayBuffer()` 整包缓冲。SSE 永远播不出来，>25s 的 turn 一律 504 | `--upstream-timeout` 可配（默认 5m）+ `res_start/res_chunk/res_end` 流式分片，首字节即时到达 |
-| 一机一端口 | 一个 agent 名只能 `--upstream` 一个本地端口 | `--upstream /a=http://127.0.0.1:43110,/b=http://127.0.0.1:8080` 按路径前缀路由 + `--name a,b` 单连接多注册 |
+| 一机一端口 | 一个 agent 名只能 `--upstream` 一个本地端口 | `--upstream /a=http://127.0.0.1:43210,/b=http://127.0.0.1:18080` 按路径前缀路由 + `--name a,b` 单连接多注册 |
 
 ## 用法
 
 ```bash
 go build -o frp-go ./cmd/frp-go   # 或：GOPROXY=off go build -mod=vendor ./...
 
-# 服务端（WS 模式）
-./frp-go --mode ws-server --http 8080 --ttl-hours 24 --upstream-timeout 5m \
+# 服务端（WS 模式，go分支默认端口与main错开：http 18080 / ssh基址 15000 / 回源 43210）
+./frp-go --mode ws-server --http 18080 --ttl-hours 24 --upstream-timeout 5m \
   --public-host dev.cxu.lol --db ./data/routes.json
 
 # 客户端：一个隧道带多个本地端口
 ./frp-go --mode ws-client --server wss://dev.cxu.lol/__tunnel \
-  --name codex,api --upstream '/codex=http://127.0.0.1:43110,/api=http://127.0.0.1:8080'
+  --name codex,api --upstream '/codex=http://127.0.0.1:43210,/api=http://127.0.0.1:18080'
 
 # 客户端：ssh -R 反向（免 openssh，自动 enroll）
-./frp-go --mode ssh-client --server dev.cxu.lol --name colab1 --local 43110
+./frp-go --mode ssh-client --server dev.cxu.lol --name colab1 --local 43210
 ```
 
 ## 协议兼容

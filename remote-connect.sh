@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# 远端一键接入: https://us.cxu.lol/<name> -> 本机 127.0.0.1:43110
-# 用法: NAME=colab1 SERVER=us.cxu.lol USER=tunnel PORT=14000 ./remote-connect.sh
+# 远端一键接入(go分支): https://us.cxu.lol/<name> -> 本机 127.0.0.1:43210
+# 用法: NAME=colab1 SERVER=us.cxu.lol USER=tunnel PORT=15000 ./remote-connect.sh
 # PORT 是服务端 /__admin/alloc 返回的端口
 set -euo pipefail
 NAME="${NAME:-colab1}"
 SERVER="${SERVER:-us.cxu.lol}"
 USER="${USER:-tunnel}"
-PORT="${PORT:-14000}"
-LOCAL="${LOCAL:-43110}"
+PORT="${PORT:-15000}"
+LOCAL="${LOCAL:-43210}"
 KEY="${KEY:-$HOME/.ssh/tunnel}"
 
 if [ ! -f "$KEY" ]; then

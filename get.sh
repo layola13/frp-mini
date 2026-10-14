@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Codex Ultra 远端自动反代接入: http://dev.cxu.lol/<name>/ -> 本机 127.0.0.1:43110
+# Codex Ultra 远端自动反代接入(go分支): http://dev.cxu.lol/<name>/ -> 本机 127.0.0.1:43210
 # 基于纯 WebSocket 隧道，无需 OpenSSH，不占用系统端口与多余进程
 set -euo pipefail
 
 SERVER="${SERVER:-dev.cxu.lol}"
-LOCAL="${LOCAL:-43110}"
+LOCAL="${LOCAL:-43210}"
 
 echo "=================================================="
 echo "🚀 正在建立 Codex Ultra (远端 -> ${SERVER}) 反代接入..."

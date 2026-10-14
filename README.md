@@ -4,6 +4,8 @@
 > 服务端已在 tmux `frp` 会话后台运行（`:8080`）。
 >
 > 💡 **ws 分支特性与 Serv00 部署指南**：详见 [SERV00.md](./SERV00.md)（含纯 WebSocket 免 SSH 隧道、全双工 /ws 支持、Serv00 20进程/SSL/WAF 踩坑排障与一键脚本 get.sh）。
+>
+> **go 分支端口（与 main 错开）**：HTTP `18080`／ssh `-R` 分配段 `15000+`／远端回源 `43210`。本分支 Go 服务端（`gotunnel/`、`cmd/frp-go`）、`get.sh`/`get-ssh.sh`、`remote-auto.sh`、`deploy/` 默认即此；TS（`src/`）与下文示例仍用 main 端口。
 
 结论先行（能做，用什么语言）：
 - **能做，不用动态改 Nginx/Caddy。** 入口只配一次通配反代 ` us.cxu.lol/* → 127.0.0.1:8080`，

@@ -1,6 +1,6 @@
 // Command line server: HTTP+WS reverse tunnel multiplexor.
 //
-//	frp-go --mode ws-server --http 8080 --ttl-hours 24 \
+//	frp-go --mode ws-server --http 18080 --ttl-hours 24 \
 //	  --upstream-timeout 5m --public-host dev.cxu.lol
 package gotunnel
 
@@ -53,14 +53,14 @@ type Options struct {
 // the fix: 25s hardcoded there, 5m here and flag-tunable).
 func DefaultOptions() Options {
 	return Options{
-		HTTPPort:        8080,
+		HTTPPort:        18080,
 		TTL:             24 * time.Hour,
 		UpstreamTimeout: 5 * time.Minute,
-		SSHBasePort:     14000,
+		SSHBasePort:     15000,
 		SSHMaxSlots:     200,
 		DBFile:          "./data/routes.json",
 		PublicHost:      "proxy.cxu.lol",
-		StaticRoot:      "http://127.0.0.1:43110",
+		StaticRoot:      "http://127.0.0.1:43210",
 		StaticBinds:     map[string]string{},
 		RepoDir:         ".",
 		EnrollSecret:    "cxu.lol",
@@ -952,15 +952,21 @@ func (s *Server) serveControl(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			s.mu.Lock()
-			if old, ok := s.agents[name]; ok && old.conn != conn {
-				_ = old.conn.Close()
-			}
 			now := time.Now()
-			created := now
 			if old, ok := s.agents[name]; ok {
-				created = old.createdAt
+				if old.conn != conn {
+					_ = old.conn.Close()
+					s.agents[name] = &agent{conn: conn, createdAt: old.createdAt, expiresAt: now.Add(s.opt.TTL)}
+				} else {
+					// Same control conn re-registering: reuse the struct and
+					// only refresh expiry. Allocating a fresh struct here gave
+					// in-flight agentSend calls a different writeMu for the
+					// same conn -> "concurrent write to websocket connection".
+					old.expiresAt = now.Add(s.opt.TTL)
+				}
+			} else {
+				s.agents[name] = &agent{conn: conn, createdAt: now, expiresAt: now.Add(s.opt.TTL)}
 			}
-			s.agents[name] = &agent{conn: conn, createdAt: created, expiresAt: now.Add(s.opt.TTL)}
 			exp := now.Add(s.opt.TTL)
 			owned := false
 			for _, n := range agentNames {
@@ -1080,8 +1086,9 @@ func (s *Server) serveVisitorWS(w http.ResponseWriter, r *http.Request) {
 	// Agent path: relay frames through the control channel.
 	s.mu.Lock()
 	ag, hasAgent := s.agents[wsName]
+	live := hasAgent && ag.expiresAt.After(time.Now())
 	s.mu.Unlock()
-	if hasAgent && ag.expiresAt.After(time.Now()) {
+	if live {
 		conn, err := s.wsUpgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
