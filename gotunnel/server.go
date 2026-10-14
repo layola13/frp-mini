@@ -357,12 +357,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == "/get.sh" || r.URL.Path == "/join.sh" {
-		s.serveScript(w, s.opt.GetSHFile)
+		s.serveScript(w, r, s.opt.GetSHFile)
 		return
 	}
 	// Original openssh flavour of /get.sh (proxy.cxu.lol mode).
 	if r.URL.Path == "/ssh.sh" || r.URL.Path == "/get-ssh.sh" || r.URL.Path == "/remote-auto.sh" || r.URL.Path == "/remote-ssh.sh" {
-		s.serveScript(w, s.opt.SSHSHFile)
+		s.serveScript(w, r, s.opt.SSHSHFile)
 		return
 	}
 	if r.URL.Path == "/__enroll" && r.Method == "POST" {
@@ -469,16 +469,27 @@ func (s *Server) serveRepoFile(w http.ResponseWriter, rel, ctype string, repl ma
 var serverDefaultRE = regexp.MustCompile(`SERVER="\$\{SERVER:-[^}]*\}"`)
 
 // serveScript serves a get.sh flavour with its embedded default SERVER
-// rewritten to this server's public host (both ws + ssh flavours share the
-// same `SERVER="${SERVER:-...}"` idiom).
-func (s *Server) serveScript(w http.ResponseWriter, rel string) {
+// rewritten to the request's Host (gows.cxu.lol serves ws scripts pointing
+// at itself, go.cxu.lol serves ssh scripts pointing at itself), falling
+// back to PublicHost. Both flavours share the `SERVER="${SERVER:-...}"`
+// idiom.
+func (s *Server) serveScript(w http.ResponseWriter, r *http.Request, rel string) {
 	raw, err := os.ReadFile(filepath.Join(s.opt.RepoDir, rel))
 	if err != nil {
 		http.Error(w, rel+" missing: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	host := s.opt.PublicHost
+	if h := strings.ToLower(strings.TrimSpace(r.Host)); h != "" {
+		if i := strings.LastIndex(h, ":"); i >= 0 && !strings.Contains(h[i:], "]") {
+			h = h[:i] // strip :port (Host is a bare name behind nginx)
+		}
+		if h = strings.Trim(h, "[]"); h != "" {
+			host = h
+		}
+	}
 	body := serverDefaultRE.ReplaceAllString(string(raw),
-		`SERVER="${SERVER:-`+s.opt.PublicHost+`}"`)
+		`SERVER="${SERVER:-`+host+`}"`)
 	w.Header().Set("content-type", "text/x-shellscript; charset=utf-8")
 	w.Header().Set("cache-control", "no-cache")
 	_, _ = io.WriteString(w, body)
