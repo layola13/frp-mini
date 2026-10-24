@@ -1,6 +1,8 @@
 import { serve, listen } from "bun";
 import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // us.cxu.lol/<name> -> remote 127.0.0.1:43110
 // 双模式:
@@ -35,6 +37,20 @@ const TCP_BASE = Number(getArg("tcp-base-port", process.env.TCP_BASE_PORT ?? "15
 const TCP_MAX = Number(getArg("tcp-max-slots", process.env.TCP_MAX_SLOTS ?? "200"));
 const TCP_PUBLIC_HOST = getArg("tcp-host", process.env.TCP_HOST ?? "127.0.0.1");
 const DB_FILE = getArg("db", process.env.ROUTES_DB ?? "./data/routes.json");
+// 兼容源码运行与 bun --compile 单文件部署: 从可执行文件目录/仓库根/当前目录查找静态资源
+function readAsset(rel: string): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    join(here, "..", rel),
+    join(dirname(process.execPath), rel),
+    join(dirname(process.execPath), "..", rel),
+    join(process.cwd(), rel),
+  ];
+  for (const p of candidates) {
+    try { if (existsSync(p)) return readFileSync(p, "utf8"); } catch {}
+  }
+  throw new Error(`asset not found: ${rel} (tried ${candidates.join(", ")})`);
+}
 const AUTH_KEYS = getArg("auth-keys", process.env.AUTH_KEYS ?? "/home/tunnel/.ssh/authorized_keys");
 // A类绑定(静态/永久): 根路径 / 固定反代本地 43110,不走24h过期;远端动态名走 /<name>/ (B类,24h有效)
 // STATIC_ROOT 为空则关闭根静态绑定;STATIC_BINDS 格式 "name=http://127.0.0.1:port,..." 可再加若干静态名
@@ -575,7 +591,7 @@ serve({
     // 脚本直链: 远端 curl -fsSL http://${PUBLIC_HOST}/get.sh | bash (免 SSH WebSocket 隧道模式)
     if (url.pathname === "/get.sh" || url.pathname === "/join.sh") {
       try {
-        let sh = readFileSync(new URL("../get.sh", import.meta.url), "utf8");
+        let sh = readAsset("get.sh");
         sh = sh.replace('SERVER="${SERVER:-dev.cxu.lol}"', `SERVER="\${SERVER:-${PUBLIC_HOST}}"`);
         return new Response(sh, { headers: { "content-type": "text/x-shellscript; charset=utf-8", "cache-control": "no-cache" } });
       } catch (e: any) {
@@ -593,7 +609,7 @@ serve({
     }
     if (url.pathname === "/client.ts") {
       try {
-        const code = readFileSync(new URL("./client.ts", import.meta.url), "utf8");
+        const code = readAsset("src/client.ts");
         return new Response(code, { headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-cache" } });
       } catch (e: any) {
         return new Response(`client.ts missing: ${e?.message ?? e}`, { status: 500 });

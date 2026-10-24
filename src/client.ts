@@ -42,6 +42,9 @@ function sendWS(msg: any) {
 }
 const activeWs = new Map<string, WebSocket>();
 const tcpConns = new Map<string, any>();
+// 本地 TCP 连接建立前到达的数据先排队(SSH 等协议会立即发 banner), 避免丢包导致流损坏
+const tcpPending = new Map<string, string[]>();
+const tcpEarlyClose = new Set<string>();
 
 function connect() {
   ws = new WebSocket(currentURL);
@@ -129,7 +132,13 @@ function connect() {
     }
     if (m.type === "tcp_data") {
       const sock = tcpConns.get(m.connId);
-      if (sock && m.data) { try { sock.write(Buffer.from(m.data, "base64")); } catch {} }
+      if (sock && m.data) {
+        try { sock.write(Buffer.from(m.data, "base64")); } catch {}
+      } else if (m.data) {
+        let q = tcpPending.get(m.connId);
+        if (!q) { q = []; tcpPending.set(m.connId, q); }
+        if (q.length < 4096) q.push(m.data);
+      }
       return;
     }
     if (m.type === "tcp_close") {
@@ -137,6 +146,8 @@ function connect() {
       if (sock) {
         tcpConns.delete(m.connId);
         try { sock.end(); } catch { try { sock.terminate?.(); } catch {} }
+      } else {
+        tcpEarlyClose.add(m.connId);
       }
       return;
     }
@@ -149,6 +160,8 @@ function connect() {
     activeWs.clear();
     for (const [, sock] of tcpConns.entries()) { try { sock.end(); } catch {} }
     tcpConns.clear();
+    tcpPending.clear();
+    tcpEarlyClose.clear();
     console.log(`[client] disconnected, retry in ${backoff}ms`);
     setTimeout(connect, backoff);
     backoff = Math.min(backoff * 2, 30_000);
@@ -192,8 +205,17 @@ async function handleTcpOpen(m: any) {
         },
       },
     });
-    if (!closed) tcpConns.set(connId, sock);
+    if (closed) return;
+    tcpConns.set(connId, sock);
+    const q = tcpPending.get(connId);
+    if (q) {
+      for (const d of q) { try { sock.write(Buffer.from(d, "base64")); } catch {} }
+      tcpPending.delete(connId);
+    }
+    if (tcpEarlyClose.delete(connId)) { try { sock.end(); } catch {} }
   } catch (e: any) {
+    tcpPending.delete(connId);
+    tcpEarlyClose.delete(connId);
     sendWS({ type: "tcp_close", connId, error: e?.message ?? String(e) });
   }
 }
