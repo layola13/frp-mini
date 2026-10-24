@@ -14,6 +14,16 @@ const RAW = getArg("server", "ws://127.0.0.1:8080/__tunnel");
 const NAME = (getArg("name", "colab1") || "colab1").toLowerCase();
 const UPSTREAM = (getArg("upstream", "http://127.0.0.1:43110") || "").replace(/\/$/, "");
 const TOKEN = process.env.TUNNEL_TOKEN ?? getArg("token", "");
+// TCP 公网端口转发: --tcp-target host:port [--tcp-port 期望公网端口]
+const TCP_TARGET = getArg("tcp-target", process.env.TCP_TARGET ?? "");
+const TCP_PORT = Number(getArg("tcp-port", process.env.TCP_PORT ?? "0")) || 0;
+const TCP_ENABLED = TCP_TARGET.length > 0;
+
+function splitHostPort(s: string): [string, number] {
+  const i = s.lastIndexOf(":");
+  if (i <= 0) return [s, 0];
+  return [s.slice(0, i), Number(s.slice(i + 1)) || 0];
+}
 
 function serverURL(): string {
   if (RAW.includes("://")) return RAW + (RAW.includes("?") ? "&" : "?") + `name=${encodeURIComponent(NAME)}`;
@@ -27,21 +37,32 @@ console.log(`[client] dialing ${currentURL.replace(/token=[^&]*/g, "token=***")}
 
 let ws: WebSocket | null = null;
 let backoff = 1000;
+function sendWS(msg: any) {
+  try { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); } catch {}
+}
 const activeWs = new Map<string, WebSocket>();
+const tcpConns = new Map<string, any>();
 
 function connect() {
   ws = new WebSocket(currentURL);
   ws.binaryType = "arraybuffer";
   ws.onopen = () => {
     backoff = 1000;
-    ws!.send(JSON.stringify({ type: "register", name: NAME, token: TOKEN || undefined }));
+    ws!.send(JSON.stringify({
+      type: "register", name: NAME, token: TOKEN || undefined,
+      tcp: TCP_ENABLED ? { port: TCP_PORT || undefined } : undefined,
+    }));
     console.log("[client] connected, registered");
   };
   ws.onmessage = async (ev) => {
     let m: any;
     try { m = JSON.parse(String(ev.data)); } catch { return; }
-    if (m.type === "ping") { ws?.send(JSON.stringify({ type: "pong" })); return; }
-    if (m.type === "registered") { console.log(`[client] route live: /${m.name}/`); return; }
+    if (m.type === "ping") { sendWS({ type: "pong" }); return; }
+    if (m.type === "registered") {
+      console.log(`[client] route live: /${m.name}/`);
+      if (m.tcpPort) console.log(`[client] tcp public: ${m.tcpHost ?? ""}:${m.tcpPort} -> ${TCP_TARGET}`);
+      return;
+    }
     if (m.type === "error") { console.error(`[client] server error: ${m.error}`); return; }
 
     // 1. HTTP 转发
@@ -60,22 +81,22 @@ function connect() {
 
         upstreamWs.onmessage = (event) => {
           if (typeof event.data === "string") {
-            ws?.send(JSON.stringify({ type: "ws_data", connId: m.connId, data: event.data, isBinary: false }));
+            sendWS({ type: "ws_data", connId: m.connId, data: event.data, isBinary: false });
           } else {
             const b64 = Buffer.from(event.data).toString("base64");
-            ws?.send(JSON.stringify({ type: "ws_data", connId: m.connId, data: b64, isBinary: true }));
+            sendWS({ type: "ws_data", connId: m.connId, data: b64, isBinary: true });
           }
         };
         upstreamWs.onclose = (event) => {
-          ws?.send(JSON.stringify({ type: "ws_close", connId: m.connId, code: event.code, reason: event.reason }));
+          sendWS({ type: "ws_close", connId: m.connId, code: event.code, reason: event.reason });
           activeWs.delete(m.connId);
         };
         upstreamWs.onerror = () => {
-          ws?.send(JSON.stringify({ type: "ws_close", connId: m.connId, code: 1011, reason: "upstream ws error" }));
+          sendWS({ type: "ws_close", connId: m.connId, code: 1011, reason: "upstream ws error" });
           activeWs.delete(m.connId);
         };
       } catch (err: any) {
-        ws?.send(JSON.stringify({ type: "ws_close", connId: m.connId, code: 1011, reason: err?.message }));
+        sendWS({ type: "ws_close", connId: m.connId, code: 1011, reason: err?.message });
       }
       return;
     }
@@ -100,23 +121,81 @@ function connect() {
       }
       return;
     }
+
+    // 3. 原始 TCP 转发 (公网端口 <-> 本地 --tcp-target)
+    if (m.type === "tcp_open") {
+      await handleTcpOpen(m);
+      return;
+    }
+    if (m.type === "tcp_data") {
+      const sock = tcpConns.get(m.connId);
+      if (sock && m.data) { try { sock.write(Buffer.from(m.data, "base64")); } catch {} }
+      return;
+    }
+    if (m.type === "tcp_close") {
+      const sock = tcpConns.get(m.connId);
+      if (sock) {
+        tcpConns.delete(m.connId);
+        try { sock.end(); } catch { try { sock.terminate?.(); } catch {} }
+      }
+      return;
+    }
   };
-  ws.onclose = () => {
+  ws.onclose = (ev: any) => {
+    if (ev?.code && ev.code !== 1000) console.log(`[client] ws closed code=${ev.code} reason=${ev?.reason ?? ""}`);
     for (const [id, uws] of activeWs.entries()) {
       try { uws.close(); } catch {}
     }
     activeWs.clear();
+    for (const [, sock] of tcpConns.entries()) { try { sock.end(); } catch {} }
+    tcpConns.clear();
     console.log(`[client] disconnected, retry in ${backoff}ms`);
     setTimeout(connect, backoff);
     backoff = Math.min(backoff * 2, 30_000);
   };
-  ws.onerror = () => {
+  ws.onerror = (e: any) => {
+    console.log("[client] ws error:", e?.message ?? e);
     if (currentURL.startsWith("ws://") && !currentURL.includes("127.0.0.1") && !currentURL.includes("localhost")) {
       console.log("[client] ws connection failed (redirect?), upgrading to wss:// ...");
       currentURL = currentURL.replace(/^ws:\/\//, "wss://");
     }
     try { ws?.close(); } catch {}
   };
+}
+
+async function handleTcpOpen(m: any) {
+  const connId: string = m.connId;
+  const [host, port] = splitHostPort(TCP_TARGET);
+  if (!host || !port) {
+    sendWS({ type: "tcp_close", connId, error: `bad tcp target: ${TCP_TARGET}` });
+    return;
+  }
+  let closed = false;
+  try {
+    const sock = await Bun.connect({
+      hostname: host,
+      port,
+      socket: {
+        open(s) { tcpConns.set(connId, s); },
+        data(_s, data) {
+          sendWS({ type: "tcp_data", connId, data: Buffer.from(data).toString("base64") });
+        },
+        close() {
+          closed = true;
+          if (!tcpConns.delete(connId)) return;
+          sendWS({ type: "tcp_close", connId });
+        },
+        error(_s, err) {
+          closed = true;
+          if (!tcpConns.delete(connId)) return;
+          sendWS({ type: "tcp_close", connId, error: err?.message });
+        },
+      },
+    });
+    if (!closed) tcpConns.set(connId, sock);
+  } catch (e: any) {
+    sendWS({ type: "tcp_close", connId, error: e?.message ?? String(e) });
+  }
 }
 
 async function handleReq(m: ReqMsg) {
@@ -147,7 +226,7 @@ async function handleReq(m: ReqMsg) {
     resHeaders["content-type"] = "text/plain";
     bodyB64 = Buffer.from(`upstream ${UPSTREAM} unreachable: ${e?.message ?? e}`).toString("base64");
   }
-  ws?.send(JSON.stringify({ type: "res", id: m.id, status, headers: resHeaders, bodyB64 }));
+  sendWS({ type: "res", id: m.id, status, headers: resHeaders, bodyB64 });
 }
 
 connect();

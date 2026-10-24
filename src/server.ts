@@ -1,4 +1,4 @@
-import { serve } from "bun";
+import { serve, listen } from "bun";
 import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 
@@ -30,6 +30,10 @@ const UPSTREAM_TIMEOUT_MS = 25_000;
 const MAX_BODY = 10 * 1024 * 1024;
 const SSH_BASE = Number(getArg("ssh-base-port", process.env.SSH_BASE_PORT ?? "14000"));
 const SSH_MAX = Number(getArg("ssh-max-slots", "200"));
+// TCP 公网端口转发: 远端 WS 客户端可申请一个公网 TCP 端口, 流量经控制通道多路复用回源到本地 TCP 服务
+const TCP_BASE = Number(getArg("tcp-base-port", process.env.TCP_BASE_PORT ?? "15000"));
+const TCP_MAX = Number(getArg("tcp-max-slots", process.env.TCP_MAX_SLOTS ?? "200"));
+const TCP_PUBLIC_HOST = getArg("tcp-host", process.env.TCP_HOST ?? "127.0.0.1");
 const DB_FILE = getArg("db", process.env.ROUTES_DB ?? "./data/routes.json");
 const AUTH_KEYS = getArg("auth-keys", process.env.AUTH_KEYS ?? "/home/tunnel/.ssh/authorized_keys");
 // A类绑定(静态/永久): 根路径 / 固定反代本地 43110,不走24h过期;远端动态名走 /<name>/ (B类,24h有效)
@@ -121,6 +125,12 @@ type TcpRoute = { name: string; port: number; pubkeyFp?: string; createdAt: numb
 const agents = new Map<string, Agent>();
 const tcpRoutes = new Map<string, TcpRoute>();
 const visitorSockets = new Map<string, any>();
+// --- TCP 公网转发 ---
+type TcpPublic = { name: string; port: number; createdAt: number; expiresAt: number };
+const tcpPublics = new Map<string, TcpPublic>();          // name -> 端口分配
+const tcpListeners = new Map<number, { name: string; listener: any }>(); // port -> 监听器
+const tcpSockConn = new Map<any, string>();               // 访客 socket -> connId
+const tcpConnSock = new Map<string, { sock: any; name: string }>(); // connId -> 访客 socket
 type PendingEntry = {
   resolve: (r: Response) => void;
   reject: (e: Error) => void;
@@ -158,11 +168,101 @@ function allocPort(): number | null {
   }
   return null;
 }
+function allocTcpPort(requested = 0): number | null {
+  const used = new Set([...tcpPublics.values()].map((r) => r.port));
+  if (requested >= TCP_BASE && requested < TCP_BASE + TCP_MAX && !used.has(requested) && !tcpListeners.has(requested)) return requested;
+  for (let i = 0; i < TCP_MAX; i++) {
+    const p = TCP_BASE + i;
+    if (!used.has(p) && !tcpListeners.has(p)) return p;
+  }
+  return null;
+}
+
+function stopTcpListener(name: string) {
+  for (const [port, ent] of [...tcpListeners.entries()]) {
+    if (ent.name !== name) continue;
+    try { ent.listener.stop(true); } catch { try { ent.listener.stop(); } catch {} }
+    tcpListeners.delete(port);
+  }
+  for (const [cid, ent] of [...tcpConnSock.entries()]) {
+    if (ent.name !== name) continue;
+    tcpSockConn.delete(ent.sock);
+    tcpConnSock.delete(cid);
+    try { ent.sock.end(); } catch { try { ent.sock.terminate(); } catch {} }
+  }
+}
+
+function sendToAgent(name: string, msg: any): boolean {
+  const ag = agents.get(name);
+  if (!ag || ag.ws.readyState !== WebSocket.OPEN) return false;
+  try { ag.ws.send(JSON.stringify(msg)); return true; } catch { return false; }
+}
+
+function startTcpListener(name: string, port: number): boolean {
+  if (tcpListeners.has(port)) return true;
+  try {
+    const listener = listen({
+      hostname: "0.0.0.0",
+      port,
+      socket: {
+        open(sock: any) {
+          const connId = `tcp-${rid()}`;
+          tcpSockConn.set(sock, connId);
+          tcpConnSock.set(connId, { sock, name });
+          if (!sendToAgent(name, { type: "tcp_open", connId })) {
+            tcpSockConn.delete(sock); tcpConnSock.delete(connId);
+            try { sock.end(); } catch {}
+          }
+        },
+        data(sock: any, data: Uint8Array) {
+          const connId = tcpSockConn.get(sock);
+          if (!connId) return;
+          sendToAgent(name, { type: "tcp_data", connId, data: Buffer.from(data).toString("base64") });
+        },
+        close(sock: any) {
+          const connId = tcpSockConn.get(sock);
+          if (!connId) return;
+          tcpSockConn.delete(sock); tcpConnSock.delete(connId);
+          sendToAgent(name, { type: "tcp_close", connId });
+        },
+        error(sock: any, err: Error) {
+          const connId = tcpSockConn.get(sock);
+          if (!connId) return;
+          tcpSockConn.delete(sock); tcpConnSock.delete(connId);
+          sendToAgent(name, { type: "tcp_close", connId, error: err?.message });
+        },
+      },
+    });
+    tcpListeners.set(port, { name, listener });
+    console.log(`[tcp] ${name} listening 0.0.0.0:${port}`);
+    return true;
+  } catch (e: any) {
+    console.error(`[tcp] listen ${port} fail: ${e?.message ?? e}`);
+    return false;
+  }
+}
+
+function assignTcpRoute(name: string, requested?: number): TcpPublic | null {
+  const now = Date.now();
+  const old = tcpPublics.get(name);
+  if (old && old.expiresAt > now && startTcpListener(name, old.port)) {
+    old.expiresAt = now + TTL_MS;
+    return old;
+  }
+  const port = allocTcpPort(Number(requested) || 0);
+  if (!port) return null;
+  const r: TcpPublic = { name, port, createdAt: now, expiresAt: now + TTL_MS };
+  tcpPublics.set(name, r);
+  if (!startTcpListener(name, port)) { tcpPublics.delete(name); return null; }
+  return r;
+}
+
 function sweep() {
   const now = Date.now();
   let changed = false;
   for (const [n, a] of agents) if (a.expiresAt <= now) { try { a.ws.close(); } catch {} agents.delete(n); changed = true; console.log(`[expire] ws agent ${n}`); }
   for (const [n, r] of tcpRoutes) if (r.expiresAt <= now) { tcpRoutes.delete(n); changed = true; console.log(`[expire] ssh route ${n} :${r.port} (需远端断开 ssh -R,端口自动回收)`); }
+  for (const [n, r] of tcpPublics) if (r.expiresAt <= now) { stopTcpListener(n); tcpPublics.delete(n); changed = true; console.log(`[expire] tcp route ${n} :${r.port}`); }
   if (changed) saveDb();
 }
 setInterval(sweep, 60_000);
@@ -458,7 +558,12 @@ serve({
       return new Response("websocket tunnel not found", { status: 404 });
     }
 
-    if (url.pathname === "/__health") return Response.json({ ok: true, staticRoot: STATIC_ROOT || null, staticBinds: [...STATIC_BINDS.keys()], ws: [...agents.keys()], ssh: [...tcpRoutes.values()].map((r) => ({ name: r.name, port: r.port, expiresAt: r.expiresAt })) });
+    if (url.pathname === "/__health") return Response.json({
+      ok: true, staticRoot: STATIC_ROOT || null, staticBinds: [...STATIC_BINDS.keys()],
+      ws: [...agents.keys()],
+      ssh: [...tcpRoutes.values()].map((r) => ({ name: r.name, port: r.port, expiresAt: r.expiresAt })),
+      tcp: [...tcpPublics.values()].map((r) => ({ name: r.name, port: r.port, host: TCP_PUBLIC_HOST, expiresAt: r.expiresAt })),
+    });
     // 落地页: /get 给远端一条命令, 无需手动拷贝脚本; / 本体留给 A 类静态绑定(本地43110)
     if ((url.pathname === "/get" || url.pathname === "/join") && req.method === "GET") {
       const accept = req.headers.get("accept") ?? "";
@@ -508,6 +613,7 @@ serve({
         routes: [
           ...[...agents.entries()].map(([n, a]) => ({ name: n, via: "ws", path: `/${n}/`, expiresInSec: Math.max(0, Math.round((a.expiresAt - now) / 1000)) })),
           ...[...tcpRoutes.entries()].map(([n, r]) => ({ name: n, via: "ssh", port: r.port, path: `/${n}/`, expiresInSec: Math.max(0, Math.round((r.expiresAt - now) / 1000)) })),
+          ...[...tcpPublics.entries()].map(([n, r]) => ({ name: n, via: "tcp", host: TCP_PUBLIC_HOST, port: r.port, expiresInSec: Math.max(0, Math.round((r.expiresAt - now) / 1000)) })),
         ],
       });
     }
@@ -740,12 +846,38 @@ serve({
         const now = Date.now();
         agents.set(name, { ws: ws as any, createdAt: old?.createdAt ?? now, expiresAt: now + TTL_MS });
         data.name = name;
-        ws.send(JSON.stringify({ type: "registered", name, expiresAt: now + TTL_MS, publicUrl: `https://${PUBLIC_HOST}/${name}/` }));
-        console.log(`[server] agent online: ${name} (24h有效,到期自动下线)`);
+        // TCP 公网端口转发: 客户端传 tcp=true 或 { port } 开启
+        let tcpPort: number | undefined;
+        if (m.tcp) {
+          const r = assignTcpRoute(name, typeof m.tcp === "object" ? m.tcp.port : undefined);
+          if (!r) { ws.send(JSON.stringify({ type: "error", error: "no free tcp ports" })); return; }
+          tcpPort = r.port;
+        } else if (tcpPublics.has(name)) {
+          stopTcpListener(name); tcpPublics.delete(name);
+        }
+        ws.send(JSON.stringify({
+          type: "registered", name, expiresAt: now + TTL_MS,
+          publicUrl: `https://${PUBLIC_HOST}/${name}/`,
+          tcpPort, tcpHost: tcpPort ? TCP_PUBLIC_HOST : undefined,
+        }));
+        console.log(`[server] agent online: ${name} (24h有效,到期自动下线)${tcpPort ? ` tcp :${tcpPort}` : ""}`);
         return;
       }
       if (m.type === "pong") return;
       if (m.type === "res" && m.id) { applyRes(m.id, m as ProxyRes); return; }
+      if (m.type === "tcp_data" && m.connId) {
+        const ent = tcpConnSock.get(m.connId);
+        if (ent && m.data) { try { ent.sock.write(Buffer.from(m.data, "base64")); } catch {} }
+        return;
+      }
+      if (m.type === "tcp_close" && m.connId) {
+        const ent = tcpConnSock.get(m.connId);
+        if (ent) {
+          tcpSockConn.delete(ent.sock); tcpConnSock.delete(m.connId);
+          try { ent.sock.end(); } catch { try { ent.sock.terminate(); } catch {} }
+        }
+        return;
+      }
       if (m.type === "ws_data" && m.connId) {
         const vws = visitorSockets.get(m.connId);
         if (vws && vws.readyState === WebSocket.OPEN) {
@@ -786,7 +918,9 @@ serve({
       const name = data?.name;
       if (name && agents.get(name)?.ws === (ws as any)) {
         agents.delete(name);
-        console.log(`[server] agent offline: ${name}`);
+        stopTcpListener(name);
+        tcpPublics.delete(name);
+        console.log(`[server] agent offline: ${name} (tcp port released)`);
         for (const [cid, vws] of visitorSockets.entries()) {
           if (vws.data?.agentName === name) {
             try { vws.close(1001, "agent disconnected"); } catch {}
@@ -801,4 +935,5 @@ serve({
 console.log(`[server] http+control ws on :${HTTP_PORT} ttl=${TTL_MS / 3600_000}h db=${DB_FILE}`);
 console.log(`[server] ws mode : bun src/client.ts --server ws://127.0.0.1:${HTTP_PORT}/__tunnel --name colab1 --upstream http://127.0.0.1:43110`);
 console.log(`[server] ssh mode : curl -XPOST -H 'x-admin-token: ***' localhost:${HTTP_PORT}/__admin/alloc -d '{"name":"colab1"}' -> ssh -NTR 127.0.0.1:<port>:127.0.0.1:43110 tunnel@host`);
+console.log(`[server] tcp mode : bun src/client.ts --server ws://127.0.0.1:${HTTP_PORT}/__tunnel --name colab1 --tcp-target 127.0.0.1:43110 (public ports ${TCP_BASE}-${TCP_BASE + TCP_MAX - 1} on ${TCP_PUBLIC_HOST})`);
 setInterval(() => { for (const a of agents.values()) try { a.ws.send(JSON.stringify({ type: "ping" })); } catch {} }, 25_000);

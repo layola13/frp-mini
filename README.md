@@ -66,6 +66,41 @@ bun src/client.ts --server wss://us.cxu.lol/__tunnel --name colab1 --upstream ht
 # 打开 https://us.cxu.lol/colab1/
 ```
 
+## 远端 C：TCP 端口转发（tcp 分支）
+
+在 WS 隧道基础上，把服务端的一个公网 TCP 端口经控制通道多路复用回源到远端本地 TCP 服务，
+适合 SSH、MySQL、Redis、gRPC 等非 HTTP 协议（无需公网 IP、无需额外开端口）。
+
+```bash
+# 方式 1：一键脚本（TCP=1）
+curl -fsSL https://us.cxu.lol/get.sh | TCP=1 TCP_TARGET=127.0.0.1:22 bash
+# 输出示例：👉 TCP 直连地址: us.cxu.lol:15000
+
+# 方式 2：直接运行客户端
+bun src/client.ts \
+  --server wss://us.cxu.lol/__tunnel \
+  --name colab1 \
+  --upstream http://127.0.0.1:43110 \
+  --tcp-target 127.0.0.1:22 \
+  --tcp-port 0            # 0/省略=服务端从端口池自动分配
+
+# 客户端日志会打印: [client] tcp public: us.cxu.lol:15000 -> 127.0.0.1:22
+ssh -p 15000 user@us.cxu.lol
+```
+
+服务端启动参数：
+
+```bash
+bun src/server.ts --http 8080 \
+  --tcp-base-port 15000 --tcp-max-slots 200 \
+  --tcp-host us.cxu.lol
+```
+
+- 端口池默认 `15000-15199`，按注册名分配；断线重连会重新分配（端口池空闲时通常保持原端口）。
+- 端口随 24h TTL 过期回收；agent 断线立即释放。
+- `GET /__health` 的 `tcp` 字段、`GET /__routes` 可查看当前 TCP 路由。
+- 若前面还有 Nginx/Caddy，需要额外放行该端口段（TCP stream 转发），或直接暴露 Bun 端口。
+
 ## 24h 有效怎么实现
 
 - 注册/分配时写 `expiresAt = now + TTL`（默认 24h，`--ttl-hours` 可调）。
